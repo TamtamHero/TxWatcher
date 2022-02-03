@@ -1,4 +1,4 @@
 .vscode
-db/*
+level.db
 dist
 node_modules
