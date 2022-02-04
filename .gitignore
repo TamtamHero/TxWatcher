@@ -2,3 +2,4 @@
 level.db
 dist
 node_modules
+config.json
