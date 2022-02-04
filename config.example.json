@@ -1,4 +1,5 @@
 {
   "telegram_token": "YOUR-TOKEN",
-  "eth_RPC": "127.0.0.1:8545"
+  "eth_RPC": "127.0.0.1:8545",
+  "MAX_ADDRESS_MONITORED": 15
 }

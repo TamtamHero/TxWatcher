@@ -5,51 +5,73 @@ import fs from 'fs';
 
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf-8'));
 const bot = new teleBot(config.telegram_token);
-const db = {};
-const disk_db = level('db/level.db');
+const watchlist = {};
+const watchlist_db = level('db/watchlist.db');
+const stats = {};
 
 function add_new_address(chat_id: number, msg: string) {
   const addr = msg.toLowerCase();
-  if (addr in db && db[addr].includes(chat_id)) {
+  if (addr in watchlist && watchlist[addr].includes(chat_id)) {
     bot.sendMessage(chat_id, 'This address is already monitored');
   } else {
-    const watchers = addr in db ? db[addr] : [];
-    watchers.push(chat_id);
+    if (chat_id in stats['watchers'] && stats['watchers'][chat_id] >= config['MAX_ADDRESS_MONITORED']) {
+      bot.sendMessage(chat_id, `You are already monitoring ${stats['watchers']} addresses (max).\nPlease 🗑 some.`);
+    } else {
+      const watchers = addr in watchlist ? watchlist[addr] : [];
+      watchers.push(chat_id);
 
-    disk_db.put(addr, watchers, (err) => {
-      if (err) {
-        throw err;
-      } else {
-        db[addr] = watchers;
-        bot.sendMessage(chat_id, `${addr} has been added to the list of monitored addres.`);
-      }
-    });
+      watchlist_db.put(addr, watchers, (err) => {
+        if (err) {
+          throw err;
+        } else {
+          watchlist[addr] = watchers;
+          stats['watchers'][chat_id] = chat_id in stats['watchers'] ? stats['watchers'][chat_id] : 1;
+          bot.sendMessage(chat_id, `${addr} has been added to the list of monitored addres.`);
+        }
+      });
+    }
   }
 }
 
 function rm_address(chat_id: number, msg: string) {
   const addr = msg.split(' ')[1].toLowerCase();
-  if (addr in db && db[addr].includes(chat_id)) {
-    const watchers = db[addr].filter((item) => item != chat_id);
+  if (addr in watchlist && watchlist[addr].includes(chat_id)) {
+    const watchers = watchlist[addr].filter((item) => item != chat_id);
     if (watchers.length == 0) {
-      disk_db.del(addr, (err) => {
+      watchlist_db.del(addr, (err) => {
         if (err) {
           throw err;
         } else {
-          delete db[addr];
+          delete watchlist[addr];
         }
       });
     } else {
-      disk_db.put(addr, watchers, (err) => {
+      watchlist_db.put(addr, watchers, (err) => {
         if (err) {
           throw err;
         }
-        db[addr] = watchers;
+        watchlist[addr] = watchers;
       });
+    }
+    stats['watchers'][chat_id] -= 1;
+    if (stats['watchers'][chat_id] <= 0) {
+      delete stats['watchers'][chat_id];
     }
     bot.sendMessage(chat_id, `${addr} has been removed from the list of monitored address.`);
   } else {
     bot.sendMessage(chat_id, 'This address is not monitored.');
+  }
+}
+
+function get_stats(chat_id: number, msg: string) {
+  do_stats();
+  if (msg.includes('full')) {
+    bot.sendMessage(chat_id, `📊\n${JSON.stringify(stats)}`);
+  } else {
+    bot.sendMessage(
+      chat_id,
+      `📊\ntotal_users: ${stats['total_users']}\ntotal_address: ${stats['total_address']}\ntotal_addresses_watched: ${stats['total_addresses_watched']}`
+    );
   }
 }
 
@@ -58,6 +80,8 @@ function handle(msg) {
     add_new_address(msg.from.id, msg.text);
   } else if (msg.text.startsWith('del ')) {
     rm_address(msg.from.id, msg.text);
+  } else if (msg.text.startsWith('stats')) {
+    get_stats(msg.from.id, msg.text);
   } else {
     bot.sendMessage(
       msg.from.id,
@@ -85,8 +109,8 @@ async function monitoring_loop(frequency: number) {
 
         for (const tx of block.transactions) {
           const src = tx.from.toLowerCase();
-          if (src in db) {
-            const chat_ids = db[src];
+          if (src in watchlist) {
+            const chat_ids = watchlist[src];
             chat_ids.map((chat_id) =>
               bot.sendMessage(chat_id, `https://etherscan.io/tx/${tx['hash']} has confirmed for address ${src}`)
             );
@@ -101,20 +125,38 @@ async function monitoring_loop(frequency: number) {
   }
 }
 
-disk_db
-  .createReadStream()
-  .on('data', function (data) {
-    db[data.key] = data.value.split(',').map((e) => Number(e));
-  })
-  .on('error', function (err) {
-    console.log('Error streaming db:', err);
-  })
-  .on('close', function () {
-    console.log('Stream closed');
-  })
-  .on('end', function () {
-    console.log('Stream ended');
-  });
+// Count number of address watched per user, and other things
+function do_stats() {
+  stats['watchers'] = {};
+  stats['total_addresses_watched'] = 0;
+  for (const addr in watchlist) {
+    watchlist[addr].map((chat_id) => {
+      chat_id in stats['watchers'] ? (stats['watchers'][chat_id] += 1) : (stats['watchers'][chat_id] = 1);
+      if (stats['watchers'][chat_id] > config['MAX_ADDRESS_MONITORED'])
+        throw `Error: user ${chat_id} has at least ${stats['watchers'][chat_id]} registered addresses.`;
+    });
+    stats['total_addresses_watched'] += watchlist[addr].length;
+  }
+  stats['total_address'] = Object.keys(watchlist).length;
+  stats['total_users'] = Object.keys(stats['watchers']).length;
+}
+
+function init() {
+  watchlist_db
+    .createReadStream()
+    .on('data', function (data) {
+      watchlist[data.key] = data.value.split(',').map((e) => Number(e));
+    })
+    .on('error', function (err) {
+      console.log('Error streaming watchlist db:', err);
+    })
+    .on('close', function () {
+      console.log('Watchlist loaded successfully');
+      do_stats();
+    });
+}
+
+init();
 
 bot.on('text', (msg) => handle(msg));
 
